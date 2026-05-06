@@ -1,0 +1,717 @@
+// 故事推动 NPC Generator - index.js
+// SillyTavern 原生扩展，兼容 eventSource 生命周期
+
+(function () {
+  "use strict";
+
+  // ============================================================
+  // 获取酒馆上下文（含切换角色卡同步）
+  // ============================================================
+  function getSTContext() {
+    try {
+      if (window.SillyTavern && window.SillyTavern.getContext) {
+        return window.SillyTavern.getContext();
+      }
+    } catch {}
+    return null;
+  }
+
+  function getCurrentCharName() {
+    try {
+      const ctx = getSTContext();
+      if (ctx) return ctx.name2 || ctx.characterId || "default";
+      const el = document.querySelector(".ch_name, #char_name_display, .character_name");
+      return el?.textContent?.trim() || "default";
+    } catch {
+      return "default";
+    }
+  }
+
+  function getChatContext() {
+    try {
+      const ctx = getSTContext();
+      if (ctx && ctx.chat) {
+        return ctx.chat
+          .slice(-20)
+          .map((m) => `${m.name}: ${m.mes}`)
+          .join("\n");
+      }
+      // fallback: JS Slash Runner API
+      const msgs = getChatMessages();
+      return msgs.slice(-20).map((m) => `${m.name}: ${m.message}`).join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  // ============================================================
+  // 存储工具（localStorage 优先，fallback 酒馆变量）
+  // ============================================================
+  const API_STORAGE_KEY  = "npc_gen_apis";
+  const ACTIVE_API_KEY   = "npc_gen_active_api";
+  const CHAR_NPC_PREFIX  = "npc_gen_npcs_";
+
+  function saveData(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); return; } catch {}
+    try { setVariable(key, JSON.stringify(value)); } catch {}
+  }
+
+  function loadData(key, fallback = null) {
+    try {
+      const r = localStorage.getItem(key);
+      if (r !== null) return JSON.parse(r);
+    } catch {}
+    try {
+      const r = getVariable(key);
+      if (r) return JSON.parse(r);
+    } catch {}
+    return fallback;
+  }
+
+  function saveCharNPCs(npcs) { saveData(CHAR_NPC_PREFIX + getCurrentCharName(), npcs); }
+  function loadCharNPCs()      { return loadData(CHAR_NPC_PREFIX + getCurrentCharName(), []); }
+  function saveAPIs(a)         { saveData(API_STORAGE_KEY, a); }
+  function loadAPIs()          { return loadData(API_STORAGE_KEY, []); }
+  function saveActiveAPI(i)    { saveData(ACTIVE_API_KEY, i); }
+  function loadActiveAPI()     { return loadData(ACTIVE_API_KEY, 0); }
+
+  // ============================================================
+  // API 调用
+  // ============================================================
+  async function callAPI(systemPrompt, userPrompt) {
+    const apis = loadAPIs();
+    const idx  = loadActiveAPI();
+    const api  = apis[idx];
+    if (!api) throw new Error("没有配置API，请先在⚙API页添加");
+
+    const resp = await fetch(api.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + api.key },
+      body: JSON.stringify({
+        model: api.model || "gpt-4o",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user",   content: userPrompt   },
+        ],
+        max_tokens: 2000,
+        temperature: 0.9,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices?.[0]?.message?.content || "";
+  }
+
+  async function fetchModels(url, key) {
+    const base = url.replace(/\/chat\/completions\/?$/, "");
+    const resp = await fetch(base + "/v1/models", {
+      headers: { Authorization: "Bearer " + key },
+    });
+    const data = await resp.json();
+    return (data.data || []).map((m) => m.id);
+  }
+
+  // ============================================================
+  // 生成函数
+  // ============================================================
+  function parseThree(raw) {
+    const pats = [
+      /【方案[一二三123]】([\s\S]*?)(?=【方案[一二三123]】|$)/g,
+      /\*\*方案[一二三123][：:]\*\*([\s\S]*?)(?=\*\*方案[一二三123][：:]|$)/g,
+      /(?:^|\n)[1-3一二三][.、:：]\s*([\s\S]*?)(?=(?:^|\n)[1-3一二三][.、:：]|$)/g,
+    ];
+    for (const p of pats) {
+      const m = [...raw.matchAll(p)];
+      if (m.length >= 2) return m.slice(0, 3).map((x) => x[1].trim());
+    }
+    const paras = raw.split(/\n\n+/).filter((p) => p.trim().length > 20);
+    return paras.length >= 2 ? paras.slice(0, 3) : [raw.trim(), "", ""];
+  }
+
+  async function genScene(mood) {
+    const ctx = getChatContext();
+    return callAPI(
+      `你是专业互动小说写手。根据对话上下文生成3个不同走向的剧情续写，只涉及现有主角和角色，不引入新NPC。
+格式：【方案一】内容 【方案二】内容 【方案三】内容，每个100-200字。`,
+      `对话上下文：\n${ctx}\n\n剧情要求：${mood || "随机，不限风格"}`
+    );
+  }
+
+  async function genWorldNPC(npcsText, mood) {
+    const ctx = getChatContext();
+    return callAPI(
+      `你是专业互动小说写手。根据对话上下文和世界书NPC设定，生成3个NPC介入剧情的续写方案。NPC必须是设定中已有的角色。
+格式：【方案一】内容 【方案二】内容 【方案三】内容，每个100-200字。`,
+      `对话上下文：\n${ctx}\n\n世界书NPC设定（重点参考）：\n${npcsText}\n\n剧情要求：${mood || "随机，不限风格"}`
+    );
+  }
+
+  async function genCustomNPC(traits, mood) {
+    const ctx = getChatContext();
+    return callAPI(
+      `你是专业互动小说写手。根据对话上下文创造一个全新NPC，生成3个不同走向的剧情方案，NPC以合理方式介入剧情。
+格式：【方案一】（先简介NPC，再写剧情）内容 【方案二】内容 【方案三】内容，每个100-200字。`,
+      `对话上下文：\n${ctx}\n\nNPC特征要求：${traits || "完全随机，性别外貌性格均随机"}\n\n剧情要求：${mood || "随机，不限风格"}`
+    );
+  }
+
+  // ★ 新增：根据剧情方案生成世界书完整NPC设定
+  async function genWorldbookEntry(scenarioText) {
+    const ctx = getChatContext();
+    return callAPI(
+      `你是专业角色设计师。根据给定的剧情方案和对话背景，为方案中出现的NPC生成一份完整的世界书角色设定档案。
+格式如下（请严格按此格式输出，方便直接粘贴进世界书）：
+
+【角色名】（名字）
+【性别】
+【年龄】
+【外貌】（详细：身高体型、发色眼色、面部特征、惯常穿着）
+【性格】（3-5个核心特质，各配一句行为描述）
+【家庭背景】（父母、成长环境、重要家庭事件）
+【人生经历】（关键转折点，塑造其性格的经历）
+【能力与特长】
+【弱点与阴暗面】
+【与主角的关系】（初识状态、潜在走向）
+【惯用台词/口头禅】（2-3句）
+【备注】（其他值得记录的细节）`,
+      `当前对话背景：\n${ctx}\n\n需要为以下剧情方案中的NPC生成世界书设定：\n${scenarioText}`
+    );
+  }
+
+  async function genMixed(npcsText, useWorld, desc) {
+    const ctx = getChatContext();
+    const npcSec = useWorld && npcsText ? `\n\n世界书NPC设定（必须使用）：\n${npcsText}` : "";
+    return callAPI(
+      `你是专业互动小说写手。根据对话上下文生成3个融合多种NPC元素的复杂剧情方案，可混合使用世界书NPC和全新NPC。
+格式：【方案一】内容 【方案二】内容 【方案三】内容，每个100-250字。`,
+      `对话上下文：\n${ctx}${npcSec}\n\n混合剧情要求：${desc || "随机混合，创意自由发挥"}`
+    );
+  }
+
+  // ============================================================
+  // 发送消息
+  // ============================================================
+  function sendToChat(text) {
+    try { sendMessage(text); return true; } catch {}
+    try { setInput(text); return false; } catch {}
+    try {
+      const inp = document.querySelector("#send_textarea, #chat_input, textarea.chat_input");
+      if (inp) { inp.value = text; inp.dispatchEvent(new Event("input", { bubbles: true })); return false; }
+    } catch {}
+    return false;
+  }
+
+  // ============================================================
+  // 显示 toast
+  // ============================================================
+  function showToast(msg, type = "info") {
+    try { toast(msg, type); return; } catch {}
+    const el = document.createElement("div");
+    el.style.cssText = `position:fixed;bottom:160px;right:24px;background:${type==="error"?"#5a1a2e":type==="success"?"#1a3a2e":"#2d2050"};color:#e0d8f0;padding:8px 14px;border-radius:8px;font-size:12px;z-index:99999;pointer-events:none;transition:opacity 0.4s`;
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 400); }, 2500);
+  }
+
+  // ============================================================
+  // UI 构建
+  // ============================================================
+  function buildUI() {
+    if (document.getElementById("npc-gen-fab")) return;
+
+    // FAB
+    const fab = document.createElement("button");
+    fab.id = "npc-gen-fab";
+    fab.title = "故事推动 NPC生成器";
+    fab.textContent = "✦";
+    document.body.appendChild(fab);
+
+    // Panel
+    const panel = document.createElement("div");
+    panel.id = "npc-gen-panel";
+    panel.innerHTML = `
+      <div class="npc-panel-header">
+        <h3>✦ 故事推动</h3>
+        <button class="npc-close-btn" id="npc-close">✕</button>
+      </div>
+      <div class="npc-tab-bar">
+        <button class="npc-tab active" data-tab="scene">① 纯剧情</button>
+        <button class="npc-tab" data-tab="world">② 世界NPC</button>
+        <button class="npc-tab" data-tab="custom">③ 自定义NPC</button>
+        <button class="npc-tab" data-tab="mixed">④ 混合</button>
+        <button class="npc-tab" data-tab="api">⚙ API</button>
+      </div>
+      <div class="npc-panel-body">
+
+        <!-- ① 纯剧情 -->
+        <div class="npc-pane" id="pane-scene">
+          <div class="npc-section">
+            <div class="npc-label">剧情氛围（可选）</div>
+            <input class="npc-input" id="scene-mood" placeholder="温馨浪漫 / 紧张刺激 / 日常轻松…">
+          </div>
+          <button class="npc-btn npc-btn-primary" id="scene-gen">生成剧情方案</button>
+          <div class="npc-results" id="scene-results"></div>
+        </div>
+
+        <!-- ② 世界NPC -->
+        <div class="npc-pane" id="pane-world" style="display:none">
+          <div class="npc-section">
+            <div class="npc-label">已保存的NPC（当前角色卡）</div>
+            <div class="npc-tags-wrap" id="world-npc-tags"></div>
+            <div class="npc-row">
+              <input class="npc-input" id="world-npc-name" placeholder="NPC名称">
+              <button class="npc-btn npc-btn-sm" id="world-npc-add">添加</button>
+            </div>
+          </div>
+          <div class="npc-section">
+            <div class="npc-label">NPC设定（粘贴世界书内容，保存后永久存于此角色卡）</div>
+            <textarea class="npc-textarea" id="world-npc-text" placeholder="把世界书里的NPC设定粘贴到这里…"></textarea>
+            <div style="margin-top:6px">
+              <button class="npc-btn npc-btn-sm" id="world-npc-save">💾 保存设定</button>
+            </div>
+          </div>
+          <div class="npc-divider"></div>
+          <div class="npc-section">
+            <div class="npc-label">剧情氛围（可选）</div>
+            <input class="npc-input" id="world-mood" placeholder="剑拔弩张 / 久别重逢 / 意外相遇…">
+          </div>
+          <button class="npc-btn npc-btn-primary" id="world-gen">生成NPC介入剧情</button>
+          <div class="npc-results" id="world-results"></div>
+        </div>
+
+        <!-- ③ 自定义NPC -->
+        <div class="npc-pane" id="pane-custom" style="display:none">
+          <div class="npc-section">
+            <div class="npc-label">NPC特征（可选，留空随机）</div>
+            <textarea class="npc-textarea" id="custom-traits" style="min-height:60px" placeholder="例：20岁女性，冷淡外表热心内里，长发 / 或留空全部随机"></textarea>
+          </div>
+          <div class="npc-section">
+            <div class="npc-label">剧情氛围（可选）</div>
+            <input class="npc-input" id="custom-mood" placeholder="搞笑混乱 / 命中注定的相遇…">
+          </div>
+          <button class="npc-btn npc-btn-primary" id="custom-gen">生成NPC + 剧情方案</button>
+          <div class="npc-results" id="custom-results"></div>
+        </div>
+
+        <!-- ④ 混合 -->
+        <div class="npc-pane" id="pane-mixed" style="display:none">
+          <div class="npc-toggle-row">
+            <label class="npc-toggle">
+              <input type="checkbox" id="mixed-use-world">
+              <span class="npc-toggle-slider"></span>
+            </label>
+            <span class="npc-toggle-label">启用世界书NPC（必须出现）</span>
+          </div>
+          <div id="mixed-world-section" style="display:none">
+            <div class="npc-section">
+              <div class="npc-label">世界书NPC设定</div>
+              <div class="npc-tags-wrap" id="mixed-npc-tags"></div>
+              <textarea class="npc-textarea" id="mixed-npc-text" style="min-height:60px" placeholder="粘贴世界书NPC设定…"></textarea>
+            </div>
+          </div>
+          <div class="npc-section">
+            <div class="npc-label">混合剧情描述（可选）</div>
+            <textarea class="npc-textarea" id="mixed-desc" style="min-height:60px" placeholder="希望出现一个神秘陌生人和已有NPC产生冲突，剧情偏悬疑…"></textarea>
+          </div>
+          <button class="npc-btn npc-btn-primary" id="mixed-gen">生成混合剧情方案</button>
+          <div class="npc-results" id="mixed-results"></div>
+        </div>
+
+        <!-- ⚙ API -->
+        <div class="npc-pane" id="pane-api" style="display:none">
+          <div class="npc-section">
+            <div class="npc-label">已保存的API</div>
+            <div id="api-list"></div>
+          </div>
+          <div class="npc-divider"></div>
+          <div class="npc-section">
+            <div class="npc-label">添加 / 编辑API</div>
+            <input class="npc-input" id="api-name" placeholder="自定义名称（如：我的GPT4）" style="margin-bottom:6px">
+            <input class="npc-input" id="api-url"  placeholder="API地址（如：https://api.openai.com/v1/chat/completions）" style="margin-bottom:6px">
+            <input class="npc-input" id="api-key"  type="password" placeholder="API密钥" style="margin-bottom:6px">
+            <div class="npc-row" style="margin-bottom:6px">
+              <select class="npc-select" id="api-model-select" style="flex:1">
+                <option value="">选择模型（或手动输入）</option>
+              </select>
+              <button class="npc-btn npc-btn-sm" id="api-fetch-models">拉取模型</button>
+            </div>
+            <input class="npc-input" id="api-model" placeholder="模型名称（如：gpt-4o）" style="margin-bottom:8px">
+            <div class="npc-row">
+              <button class="npc-btn npc-btn-primary" id="api-save" style="flex:1">保存API</button>
+              <button class="npc-btn npc-btn-sm"     id="api-clear">清空</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    `;
+    document.body.appendChild(panel);
+
+    // ---- FAB toggle ----
+    fab.addEventListener("click", () => panel.classList.toggle("open"));
+    document.getElementById("npc-close").addEventListener("click", () => panel.classList.remove("open"));
+
+    // ---- Tab 切换 ----
+    panel.querySelectorAll(".npc-tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        panel.querySelectorAll(".npc-tab").forEach((t) => t.classList.remove("active"));
+        panel.querySelectorAll(".npc-pane").forEach((p) => (p.style.display = "none"));
+        tab.classList.add("active");
+        document.getElementById("pane-" + tab.dataset.tab).style.display = "block";
+        if (tab.dataset.tab === "api")    renderAPIList();
+        if (tab.dataset.tab === "world")  renderWorldTags();
+        if (tab.dataset.tab === "mixed")  renderMixedTags();
+      });
+    });
+
+    // ============================================================
+    // 结果渲染（通用）
+    // ============================================================
+    function renderResults(containerId, options, showWorldbookBtn = false) {
+      const container = document.getElementById(containerId);
+      container.classList.add("show");
+      container.innerHTML = "";
+      const labels = ["一", "二", "三"];
+      options.forEach((text, i) => {
+        if (!text.trim()) return;
+        const item = document.createElement("div");
+        item.className = "npc-result-item";
+
+        const worldbookSection = showWorldbookBtn ? `
+          <div class="npc-worldbook-section" style="display:none">
+            <div class="npc-label" style="margin-top:10px">世界书设定档案</div>
+            <div class="npc-worldbook-text"></div>
+            <button class="npc-btn npc-btn-sm npc-copy-btn" style="margin-top:6px">📋 复制设定</button>
+          </div>` : "";
+
+        item.innerHTML = `
+          <div class="npc-result-label">方案 ${labels[i]}</div>
+          <div class="npc-result-text" contenteditable="true">${text.trim()}</div>
+          <div class="npc-result-actions">
+            ${showWorldbookBtn ? `<button class="npc-btn npc-btn-sm npc-worldbook-btn">📖 生成世界书设定</button>` : ""}
+            <button class="npc-btn npc-btn-sm npc-send-btn">发送</button>
+          </div>
+          ${worldbookSection}
+        `;
+
+        // 发送
+        item.querySelector(".npc-send-btn").addEventListener("click", () => {
+          const finalText = item.querySelector(".npc-result-text").textContent.trim();
+          const sent = sendToChat(finalText);
+          if (!sent) showToast("已填入输入框，请手动发送", "info");
+          panel.classList.remove("open");
+        });
+
+        // 生成世界书设定（仅自定义NPC模式）
+        if (showWorldbookBtn) {
+          const wbBtn = item.querySelector(".npc-worldbook-btn");
+          const wbSection = item.querySelector(".npc-worldbook-section");
+          const wbText = item.querySelector(".npc-worldbook-text");
+          const copyBtn = item.querySelector(".npc-copy-btn");
+
+          wbBtn.addEventListener("click", async () => {
+            wbBtn.disabled = true;
+            wbBtn.textContent = "生成中…";
+            wbSection.style.display = "block";
+            wbText.textContent = "正在生成角色档案…";
+            try {
+              const scenario = item.querySelector(".npc-result-text").textContent.trim();
+              const result = await genWorldbookEntry(scenario);
+              wbText.textContent = result;
+              wbBtn.textContent = "📖 重新生成";
+            } catch (e) {
+              wbText.textContent = "生成失败：" + e.message;
+              wbBtn.textContent = "📖 生成世界书设定";
+            }
+            wbBtn.disabled = false;
+          });
+
+          copyBtn.addEventListener("click", () => {
+            const content = wbText.textContent.trim();
+            if (!content) return;
+            navigator.clipboard.writeText(content)
+              .then(() => showToast("已复制到剪贴板，可直接粘贴进世界书", "success"))
+              .catch(() => {
+                // 降级方案
+                const ta = document.createElement("textarea");
+                ta.value = content;
+                ta.style.cssText = "position:fixed;opacity:0";
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                ta.remove();
+                showToast("已复制！", "success");
+              });
+          });
+        }
+
+        container.appendChild(item);
+      });
+    }
+
+    function setLoading(containerId) {
+      const c = document.getElementById(containerId);
+      c.classList.add("show");
+      c.innerHTML = `<div class="npc-loading">生成中</div>`;
+    }
+
+    // ============================================================
+    // ① 纯剧情
+    // ============================================================
+    document.getElementById("scene-gen").addEventListener("click", async () => {
+      const mood = document.getElementById("scene-mood").value.trim();
+      const btn  = document.getElementById("scene-gen");
+      btn.disabled = true;
+      setLoading("scene-results");
+      try {
+        renderResults("scene-results", parseThree(await genScene(mood)));
+      } catch (e) {
+        document.getElementById("scene-results").innerHTML = `<div class="npc-error">错误：${e.message}</div>`;
+      }
+      btn.disabled = false;
+    });
+
+    // ============================================================
+    // ② 世界NPC
+    // ============================================================
+    function renderWorldTags() {
+      const npcs = loadCharNPCs();
+      const wrap = document.getElementById("world-npc-tags");
+      wrap.innerHTML = "";
+      npcs.forEach((npc, i) => {
+        const tag = document.createElement("span");
+        tag.className = "npc-npc-tag";
+        tag.innerHTML = `${npc.name} <button data-i="${i}">×</button>`;
+        tag.querySelector("button").addEventListener("click", () => {
+          const list = loadCharNPCs(); list.splice(i, 1); saveCharNPCs(list); renderWorldTags();
+        });
+        wrap.appendChild(tag);
+      });
+      document.getElementById("world-npc-text").value = npcs.map((n) => n.text).filter(Boolean).join("\n\n---\n\n");
+    }
+
+    document.getElementById("world-npc-add").addEventListener("click", () => {
+      const inp  = document.getElementById("world-npc-name");
+      const name = inp.value.trim();
+      if (!name) return;
+      const npcs = loadCharNPCs(); npcs.push({ name, text: "" }); saveCharNPCs(npcs);
+      inp.value = ""; renderWorldTags();
+    });
+
+    document.getElementById("world-npc-save").addEventListener("click", () => {
+      const text = document.getElementById("world-npc-text").value.trim();
+      const npcs = loadCharNPCs();
+      if (npcs.length === 0) saveCharNPCs([{ name: "NPC设定", text }]);
+      else { npcs[npcs.length - 1].text = text; saveCharNPCs(npcs); }
+      showToast("NPC设定已永久保存到当前角色卡", "success");
+    });
+
+    document.getElementById("world-gen").addEventListener("click", async () => {
+      const npcs    = loadCharNPCs();
+      const npcsText = document.getElementById("world-npc-text").value.trim() || npcs.map((n) => n.text).join("\n\n");
+      if (!npcsText) { showToast("请先粘贴世界书NPC设定", "error"); return; }
+      const mood = document.getElementById("world-mood").value.trim();
+      const btn  = document.getElementById("world-gen");
+      btn.disabled = true; setLoading("world-results");
+      try {
+        renderResults("world-results", parseThree(await genWorldNPC(npcsText, mood)));
+      } catch (e) {
+        document.getElementById("world-results").innerHTML = `<div class="npc-error">错误：${e.message}</div>`;
+      }
+      btn.disabled = false;
+    });
+
+    // ============================================================
+    // ③ 自定义NPC（★ 含世界书设定生成按钮）
+    // ============================================================
+    document.getElementById("custom-gen").addEventListener("click", async () => {
+      const traits = document.getElementById("custom-traits").value.trim();
+      const mood   = document.getElementById("custom-mood").value.trim();
+      const btn    = document.getElementById("custom-gen");
+      btn.disabled = true; setLoading("custom-results");
+      try {
+        renderResults("custom-results", parseThree(await genCustomNPC(traits, mood)), true); // ← true = 显示世界书按钮
+      } catch (e) {
+        document.getElementById("custom-results").innerHTML = `<div class="npc-error">错误：${e.message}</div>`;
+      }
+      btn.disabled = false;
+    });
+
+    // ============================================================
+    // ④ 混合
+    // ============================================================
+    document.getElementById("mixed-use-world").addEventListener("change", (e) => {
+      document.getElementById("mixed-world-section").style.display = e.target.checked ? "block" : "none";
+      if (e.target.checked) renderMixedTags();
+    });
+
+    function renderMixedTags() {
+      const npcs = loadCharNPCs();
+      const wrap = document.getElementById("mixed-npc-tags");
+      wrap.innerHTML = "";
+      npcs.forEach((npc) => { const t = document.createElement("span"); t.className = "npc-npc-tag"; t.textContent = npc.name; wrap.appendChild(t); });
+      const ta = document.getElementById("mixed-npc-text");
+      if (!ta.value) ta.value = npcs.map((n) => n.text).filter(Boolean).join("\n\n---\n\n");
+    }
+
+    document.getElementById("mixed-gen").addEventListener("click", async () => {
+      const useWorld = document.getElementById("mixed-use-world").checked;
+      const npcsText = document.getElementById("mixed-npc-text").value.trim();
+      const desc     = document.getElementById("mixed-desc").value.trim();
+      if (useWorld && !npcsText) { showToast("请先填写世界书NPC设定", "error"); return; }
+      const btn = document.getElementById("mixed-gen");
+      btn.disabled = true; setLoading("mixed-results");
+      try {
+        renderResults("mixed-results", parseThree(await genMixed(npcsText, useWorld, desc)));
+      } catch (e) {
+        document.getElementById("mixed-results").innerHTML = `<div class="npc-error">错误：${e.message}</div>`;
+      }
+      btn.disabled = false;
+    });
+
+    // ============================================================
+    // ⚙ API 管理
+    // ============================================================
+    let editIdx = -1;
+
+    function renderAPIList() {
+      const apis      = loadAPIs();
+      const activeIdx = loadActiveAPI();
+      const container = document.getElementById("api-list");
+      container.innerHTML = "";
+      if (!apis.length) {
+        container.innerHTML = `<div style="color:#6b5a8e;font-size:12px;text-align:center;padding:10px">还没有保存的API，在下方添加</div>`;
+        return;
+      }
+      apis.forEach((api, i) => {
+        const item = document.createElement("div");
+        item.className = "npc-api-item" + (i === activeIdx ? " active" : "");
+        item.innerHTML = `
+          <div class="npc-api-item-name">${api.name}${i === activeIdx ? " ✓" : ""}</div>
+          <div class="npc-api-item-url">${api.url}</div>
+          <div class="npc-api-item-model">模型：${api.model || "未设置"}</div>
+          <div class="npc-row" style="margin-top:8px">
+            <button class="npc-btn npc-btn-sm use-btn"  data-i="${i}">使用</button>
+            <button class="npc-btn npc-btn-sm edit-btn" data-i="${i}">编辑</button>
+            <button class="npc-btn npc-btn-danger del-btn" data-i="${i}">删除</button>
+          </div>`;
+        item.querySelector(".use-btn").addEventListener("click", () => { saveActiveAPI(i); renderAPIList(); showToast(`已切换到：${api.name}`, "success"); });
+        item.querySelector(".edit-btn").addEventListener("click", () => {
+          editIdx = i;
+          document.getElementById("api-name").value  = api.name;
+          document.getElementById("api-url").value   = api.url;
+          document.getElementById("api-key").value   = api.key;
+          document.getElementById("api-model").value = api.model || "";
+        });
+        item.querySelector(".del-btn").addEventListener("click", () => {
+          const list = loadAPIs(); list.splice(i, 1); saveAPIs(list);
+          if (loadActiveAPI() >= list.length) saveActiveAPI(Math.max(0, list.length - 1));
+          renderAPIList();
+        });
+        container.appendChild(item);
+      });
+    }
+
+    document.getElementById("api-fetch-models").addEventListener("click", async () => {
+      const url = document.getElementById("api-url").value.trim();
+      const key = document.getElementById("api-key").value.trim();
+      if (!url || !key) { showToast("请先填写地址和密钥", "error"); return; }
+      try {
+        showToast("正在拉取模型列表…", "info");
+        const models = await fetchModels(url, key);
+        const sel    = document.getElementById("api-model-select");
+        sel.innerHTML = `<option value="">选择模型</option>`;
+        models.forEach((m) => { const o = document.createElement("option"); o.value = o.textContent = m; sel.appendChild(o); });
+        showToast(`拉取到 ${models.length} 个模型`, "success");
+      } catch (e) { showToast("拉取失败：" + e.message, "error"); }
+    });
+
+    document.getElementById("api-model-select").addEventListener("change", (e) => {
+      if (e.target.value) document.getElementById("api-model").value = e.target.value;
+    });
+
+    document.getElementById("api-save").addEventListener("click", () => {
+      const name  = document.getElementById("api-name").value.trim();
+      const url   = document.getElementById("api-url").value.trim();
+      const key   = document.getElementById("api-key").value.trim();
+      const model = document.getElementById("api-model").value.trim();
+      if (!name || !url || !key) { showToast("名称、地址、密钥不能为空", "error"); return; }
+      const apis  = loadAPIs();
+      const entry = { name, url, key, model };
+      if (editIdx >= 0 && editIdx < apis.length) { apis[editIdx] = entry; editIdx = -1; }
+      else { apis.push(entry); saveActiveAPI(apis.length - 1); }
+      saveAPIs(apis); renderAPIList();
+      document.getElementById("api-clear").click();
+      showToast(`"${name}" 已保存`, "success");
+    });
+
+    document.getElementById("api-clear").addEventListener("click", () => {
+      ["api-name","api-url","api-key","api-model"].forEach((id) => document.getElementById(id).value = "");
+      document.getElementById("api-model-select").innerHTML = `<option value="">选择模型（或手动输入）</option>`;
+      editIdx = -1;
+    });
+  }
+
+  // ============================================================
+  // 切换角色卡时同步世界书NPC标签
+  // ============================================================
+  function hookCharSwitch() {
+    try {
+      if (window.eventSource) {
+        eventSource.on(event_types.CHARACTER_SELECTED, () => {
+          const tags = document.getElementById("world-npc-tags");
+          const ta   = document.getElementById("world-npc-text");
+          if (tags) renderWorldTagsExternal(tags, ta);
+        });
+      }
+    } catch {}
+  }
+
+  function renderWorldTagsExternal(wrap, ta) {
+    const npcs = loadCharNPCs();
+    wrap.innerHTML = "";
+    npcs.forEach((npc, i) => {
+      const tag = document.createElement("span");
+      tag.className = "npc-npc-tag";
+      tag.innerHTML = `${npc.name} <button data-i="${i}">×</button>`;
+      tag.querySelector("button").addEventListener("click", () => {
+        const list = loadCharNPCs(); list.splice(i, 1); saveCharNPCs(list);
+        renderWorldTagsExternal(wrap, ta);
+      });
+      wrap.appendChild(tag);
+    });
+    if (ta) ta.value = npcs.map((n) => n.text).filter(Boolean).join("\n\n---\n\n");
+  }
+
+  // ============================================================
+  // 注册斜杠命令（兼容 JS Slash Runner）
+  // ============================================================
+  function registerSlashCmd() {
+    try {
+      slashRunner.register("npcgen", () => {
+        const panel = document.getElementById("npc-gen-panel");
+        if (panel) panel.classList.toggle("open");
+        else { buildUI(); setTimeout(() => document.getElementById("npc-gen-panel")?.classList.add("open"), 100); }
+        return "NPC生成器已打开";
+      });
+    } catch {}
+  }
+
+  // ============================================================
+  // 入口：等待酒馆 UI 就绪
+  // ============================================================
+  function init() {
+    buildUI();
+    hookCharSwitch();
+    registerSlashCmd();
+  }
+
+  // 酒馆扩展标准入口
+  if (typeof jQuery !== "undefined") {
+    jQuery(document).ready(init);
+  } else if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
