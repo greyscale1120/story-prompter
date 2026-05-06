@@ -1,0 +1,11 @@
+{
+  "display_name": "故事推动 NPC Generator",
+  "name": "npc-generator",
+  "version": "1.0.0",
+  "author": "Imola",
+  "homePage": "",
+  "auto_update": true,
+  "js": "index.js",
+  "css": "style.css",
+  "description": "悬浮NPC生成器，支持纯剧情、世界书NPC、自定义NPC和混合模式，按角色卡保存设定。"
+}
