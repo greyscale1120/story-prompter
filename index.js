@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         故事推动 NPC 生成器
-// @version      1.1.5
-// @description  模仿 sillytavernDIARY 挂载逻辑的完美版
+// @version      1.1.6
+// @description  高亮调试版：避开手机Chrome底部工具栏
 // @author       Imola
 // ==/UserScript==
 
@@ -79,7 +79,7 @@ $(document).ready(function () {
     }
 
     // ============================================================
-    // UI 与日记同款挂载逻辑
+    // UI 注入逻辑（已换上主人专属的调试 CSS！）
     // ============================================================
     function initUI() {
         if ($("#npc-gen-fab").length > 0) return;
@@ -89,28 +89,28 @@ $(document).ready(function () {
             <style id="npc-gen-style">
                 #npc-gen-fab {
                     position: fixed !important;
-                    bottom: 95px !important; /* 调整高度避免和其它图标打架 */
-                    right: 20px !important;
-                    width: 45px !important;
-                    height: 45px !important;
+                    bottom: 120px !important;  /* 往上移，避开底部工具栏 */
+                    right: 16px !important;
+                    width: 50px !important;
+                    height: 50px !important;
+                    background: red !important;  /* 先改成红色确认能看见 */
+                    z-index: 2147483647 !important;  /* 宇宙最大z-index值，强行置顶 */
                     border-radius: 50% !important;
-                    background: linear-gradient(135deg, #7c5cbf, #4a3580) !important;
                     color: white !important;
-                    z-index: 999999 !important;
                     display: flex !important;
                     align-items: center !important;
                     justify-content: center !important;
                     cursor: pointer !important;
                     font-size: 20px !important;
                     border: none !important;
-                    box-shadow: 0 4px 15px rgba(124, 92, 191, 0.4) !important;
+                    box-shadow: 0 4px 15px rgba(255, 0, 0, 0.4) !important;
                 }
                 #npc-gen-panel {
-                    position: fixed; bottom: 155px; right: 20px;
-                    width: 360px; max-height: 75vh;
+                    position: fixed; bottom: 180px; right: 16px;
+                    width: 340px; max-height: 70vh;
                     background: #1a1626; border: 1px solid #3a2d5c;
                     border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.5);
-                    z-index: 999998; display: none; flex-direction: column;
+                    z-index: 2147483646; display: none; flex-direction: column;
                     overflow: hidden; color: #e0d8f0; font-family: sans-serif;
                 }
                 #npc-gen-panel.open { display: flex; }
@@ -127,7 +127,7 @@ $(document).ready(function () {
         `;
         $('head').append(style);
 
-        // 2. 注入悬浮按钮和面板到 body 里（模仿日记插件防遮挡逻辑）
+        // 2. 注入悬浮按钮和面板
         const fab = $('<button id="npc-gen-fab">✦</button>');
         const panel = $(`
             <div id="npc-gen-panel">
@@ -190,13 +190,13 @@ $(document).ready(function () {
 
         $('.npc-tab').on('click', function () {
             $('.npc-tab').removeClass('active');
-            $(this).add('active');
+            $(this).addClass('active');
             const isApi = $(this).data('tab') === 'api';
             $("#pane-scene").toggle(!isApi);
             $("#pane-api").toggle(isApi);
         });
 
-        console.log("故事推动 NPC 生成器挂载成功！");
+        console.log("故事推动调试版挂载成功！");
     }
 
     // 4. 执行初始化
