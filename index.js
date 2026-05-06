@@ -698,20 +698,53 @@
   }
 
   // ============================================================
-  // 入口：等待酒馆 UI 就绪
+  // 入口：轮询等待 body 和聊天容器就绪后再注入
+  // 兼容酒馆助手（Tavern Helper）异步加载环境
   // ============================================================
-  function init() {
-    buildUI();
-    hookCharSwitch();
-    registerSlashCmd();
+  function waitAndInit() {
+    // 已经注入过就跳过
+    if (document.getElementById("npc-gen-fab")) return;
+
+    // 等待 body 存在且有子节点（酒馆助手有时候 body 是空的）
+    const bodyReady = document.body && document.body.children.length > 0;
+
+    if (bodyReady) {
+      buildUI();
+      hookCharSwitch();
+      registerSlashCmd();
+    } else {
+      // 每 300ms 检查一次，最多等 30 秒
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts++;
+        if (document.body && document.body.children.length > 0) {
+          clearInterval(timer);
+          buildUI();
+          hookCharSwitch();
+          registerSlashCmd();
+        } else if (attempts > 100) {
+          // 超时兜底：强行注入
+          clearInterval(timer);
+          buildUI();
+          registerSlashCmd();
+        }
+      }, 300);
+    }
   }
 
-  // 酒馆扩展标准入口
-  if (typeof jQuery !== "undefined") {
-    jQuery(document).ready(init);
-  } else if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+  // 多重触发保险，哪个先就绪用哪个
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", waitAndInit);
   } else {
-    init();
+    waitAndInit();
   }
+  // 额外保险：window load 再检查一次
+  window.addEventListener("load", () => {
+    if (!document.getElementById("npc-gen-fab")) waitAndInit();
+  });
+  // 酒馆助手有时候延迟更长，3 秒后再兜一次
+  setTimeout(() => {
+    if (!document.getElementById("npc-gen-fab")) waitAndInit();
+  }, 3000);
+
 })();
