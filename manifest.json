@@ -1,0 +1,11 @@
+{
+  "display_name": "故事推动 NPC 生成器",
+  "loading_order": 10,
+  "requires": [],
+  "optional": [],
+  "js": "script.js",
+  "author": "Imola",
+  "version": "1.0.0",
+  "homePage": "https://github.com/greyscale1120/story-prompter",
+  "auto_update": true
+}
