@@ -3,7 +3,7 @@
   "loading_order": 10,
   "requires": [],
   "optional": [],
-  "js": "script.js",
+  "js": "index.js",
   "author": "Imola",
   "version": "1.0.0",
   "homePage": "https://github.com/greyscale1120/story-prompter",
